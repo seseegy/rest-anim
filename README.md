@@ -5,7 +5,15 @@ Semua endpoint meneruskan respons upstream **AnimeIn**
 (`https://xyz-api.animein.net/3/2`, API aplikasi AnimeIn) apa adanya:
 badan respons byte-per-byte dan status HTTP diteruskan, tanpa transformasi.
 
-Dibangun di atas Cloudflare Workers + Hono (pola yang sama dengan rest-tempmail).
+Satu codebase Hono, tiga rumah: **Cloudflare Workers** (`src/index.ts` via wrangler),
+**Vercel** (`api/index.ts` + `vercel.json`), dan **Node biasa** (`src/server.ts`,
+untuk VPS/Termux). Kode + rute identik di ketiganya; yang beda cuma transport.
+
+**Catatan egress (hasil uji 23 Okt 2026):** upstream memblokir/menantang egress
+datacenter — Workers kena blokir keras 403 ("you have been blocked"), Vercel kena
+tantangan JS 403 ("Just a moment..."). Dari koneksi residensial (HP/Termux)
+keenam endpoint lolos penuh. Karena itu versi Node inilah jalur produksi yang
+terbukti: jalankan dari jaringan yang lolos.
 
 ## Endpoint
 
@@ -52,6 +60,23 @@ npm install
 npx wrangler login   # atau CLOUDFLARE_API_TOKEN
 npm run deploy
 ```
+
+## Jalan sebagai server Node (VPS / Termux)
+
+Syarat: Node.js ≥ 20 (Termux: `pkg install nodejs git`).
+
+```bash
+git clone https://github.com/seseegy/rest-anim
+cd rest-anim
+npm install
+npm run start          # PORT bawaan 8787 → http://0.0.0.0:8787
+```
+
+Port lain / timpa upstream (debug): `PORT=8080 npm run start` atau
+`UPSTREAM_BASE_URL=https://contoh.lain/3/2 npm run start`.
+
+Di VPS, bungkus dengan systemd/pm2 supaya hidup terus; di Termux cukup
+jalankan di sesi tmux. API lalu dijangkau di `http://<ip-mesin>:8787/api/home`.
 
 ## Pengembangan lokal
 
