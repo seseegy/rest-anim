@@ -196,6 +196,7 @@ app.get("/", (c) =>
       "GET /api/anime/:id",
       "GET /api/anime/:id/episodes?page=0&search=",
       "GET /api/episode/:id/stream",
+      "GET /api/image?url=<url CDN animein.net>",
     ],
   }),
 );
@@ -260,6 +261,63 @@ app.get("/api/anime/:id/episodes", (c) => {
 /** Server stream satu episode. Upstream dipanggil TANPA parameter. */
 app.get("/api/episode/:id/stream", (c) => {
   return respond(c, `/episode/streamnew/${c.req.param("id")}`, {}, (data) => ({ data }));
+});
+
+/**
+ * Proxy gambar dari CDN AnimeIn — browser langsung ke CDN itu kena
+ * tantangan Cloudflare, jadi gambar dilewatkan egress kita yang lolos.
+ * Hanya host *.animein.net (https) yang diizinkan. Cache publik 24 jam.
+ */
+app.get("/api/image", async (c) => {
+  const raw = c.req.query("url");
+  if (!raw) return c.json({ ok: false, error: { message: "parameter url wajib ada" } }, 400);
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return c.json({ ok: false, error: { message: "url tidak valid" } }, 400);
+  }
+  if (u.protocol !== "https:" || !(u.hostname === "animein.net" || u.hostname.endsWith(".animein.net"))) {
+    return c.json({ ok: false, error: { message: "host tidak diizinkan (hanya *.animein.net)" } }, 400);
+  }
+  const t0 = Date.now();
+  let status = 0;
+  let buf: ArrayBuffer | null = null;
+  let ct = "image/jpeg";
+  let attempts = 0;
+  for (let i = 0; i < 3; i++) {
+    if (i > 0) await sleep(400 * i);
+    attempts++;
+    try {
+      const up = await fetch(u.toString(), { headers: APP_HEADERS });
+      status = up.status;
+      if (status === 200) {
+        buf = await up.arrayBuffer();
+        ct = up.headers.get("Content-Type") ?? ct;
+        break;
+      }
+    } catch {
+      status = 0;
+    }
+    if (status !== 403 && status !== 0) break;
+  }
+  const headers = {
+    "X-Upstream-Status": String(status),
+    "X-Upstream-Ms": String(Date.now() - t0),
+    "X-Upstream-Path": u.pathname,
+    "X-Upstream-Attempts": String(attempts),
+  };
+  if (!buf) {
+    return c.json(
+      { ok: false, error: { message: `CDN gambar menjawab ${status}`, upstream_status: status } },
+      502,
+      headers,
+    );
+  }
+  return new Response(buf, {
+    status: 200,
+    headers: { ...headers, "Content-Type": ct, "Cache-Control": "public, max-age=86400" },
+  });
 });
 
 app.notFound((c) => c.json({ ok: false, error: { message: "route tidak ditemukan" } }, 404));
