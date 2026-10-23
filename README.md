@@ -59,6 +59,7 @@ tangkapan live Termux). Varian Node tetap tersedia untuk VPS/Termux.
 | `GET /api/anime/:id` | `/3/2/movie/detail/:id` | |
 | `GET /api/anime/:id/episodes?page=0&search=` | `/3/2/movie/episode/:id` | daftar di `data.episode`; hanya SERIES |
 | `GET /api/episode/:id/stream` | `/3/2/episode/streamnew/:id` | upstream tanpa parameter |
+| `GET /api/image?url=<url CDN>` | CDN `api.animein.net` | proxy gambar (hanya host *.animein.net); **status: CDN menolak egress server (0/18 uji 23 Okt) — rute siaga, jangan diandalkan dulu** |
 
 ## Header debug
 
