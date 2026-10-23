@@ -1,9 +1,38 @@
 # rest-anim
 
-REST API anime — **versi mentah (passthrough)** untuk keperluan debug.
-Semua endpoint meneruskan respons upstream **AnimeIn**
-(`https://xyz-api.animein.net/3/2`, API aplikasi AnimeIn) apa adanya:
-badan respons byte-per-byte dan status HTTP diteruskan, tanpa transformasi.
+REST API anime di atas upstream **AnimeIn**
+(`https://xyz-api.animein.net/3/2`, API aplikasi AnimeIn), dengan amplop
+respons yang sudah dirapikan + pagination.
+
+**Production: https://rest-anim.vercel.app**
+
+## Format respons
+
+Sukses:
+
+```json
+{ "ok": true, "data": [ ... ] }
+```
+
+Endpoint berhalaman membawa objek `pagination`:
+
+```json
+{
+  "ok": true,
+  "data": [ ... ],
+  "pagination": {
+    "page": 0, "per_page": 60, "count": 60,
+    "has_next": true, "next_page": 1, "prev_page": null
+  }
+}
+```
+
+Gagal: `{ "ok": false, "error": { "message": "...", "upstream_status": 403 } }`
+(HTTP 502 bila upstream gagal/invalid, 400 bila parameter salah).
+
+Pagination terukur dari upstream: **search/browse 60 item per halaman**,
+**daftar episode 30 item per halaman**, `page` mulai dari 0. Upstream tidak
+memberi total item — `has_next` diturunkan dari halaman yang terisi penuh.
 
 Satu codebase Hono, tiga rumah: **Cloudflare Workers** (`src/index.ts` via wrangler),
 **Vercel** (`api/index.ts` + `vercel.json`), dan **Node biasa** (`src/server.ts`,
