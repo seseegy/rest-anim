@@ -197,6 +197,7 @@ app.get("/", (c) =>
       "GET /api/anime/:id/episodes?page=0&search=",
       "GET /api/episode/:id/stream",
       "GET /api/image?url=<url CDN animein.net>",
+      "GET /api/poster?title=<judul anime> (Kitsu)",
     ],
   }),
 );
@@ -318,6 +319,89 @@ app.get("/api/image", async (c) => {
     status: 200,
     headers: { ...headers, "Content-Type": ct, "Cache-Control": "public, max-age=86400" },
   });
+});
+
+/* ------------------------------------------------------------------ */
+/* Poster & metadata dari Kitsu (basis data anime, tanpa API key).     */
+/* CDN AnimeIn menolak request server, jadi poster diambil dari Kitsu  */
+/* yang memang ramah server: media.kitsu.app.                          */
+/* ------------------------------------------------------------------ */
+
+const KITSU_BASE = "https://kitsu.io/api/edge";
+
+type KitsuAnime = {
+  id: string;
+  attributes: {
+    canonicalTitle?: string;
+    titles?: Record<string, string>;
+    abbreviatedTitles?: string[];
+    subtype?: string;
+    status?: string;
+    averageRating?: string | null;
+    episodeCount?: number | null;
+    synopsis?: string | null;
+    posterImage?: Record<string, string> | null;
+    coverImage?: Record<string, string> | null;
+  };
+};
+
+const normTitle = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * GET /api/poster?title=<judul>
+ * Cari anime di Kitsu berdasarkan judul; utamakan yang judulnya persis
+ * sama (canonical/alias), selain itu hasil teratas yang berposter.
+ * Balas: poster, cover, rating, jumlah episode, sinopsis — siap pakai
+ * sebagai pengganti poster AnimeIn. Cache publik 24 jam.
+ */
+app.get("/api/poster", async (c) => {
+  const title = (c.req.query("title") ?? "").trim();
+  if (!title) return c.json({ ok: false, error: { message: "parameter title wajib ada" } }, 400);
+  const url = `${KITSU_BASE}/anime?filter[text]=${encodeURIComponent(title)}&page[limit]=5`;
+  let list: KitsuAnime[] = [];
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/vnd.api+json" } });
+    if (!res.ok) {
+      return c.json({ ok: false, error: { message: `Kitsu menjawab ${res.status}`, upstream_status: res.status } }, 502);
+    }
+    const body = (await res.json()) as { data?: KitsuAnime[] };
+    list = body.data ?? [];
+  } catch (err) {
+    return c.json(
+      { ok: false, error: { message: "Kitsu tidak terjangkau", detail: err instanceof Error ? err.message : String(err) } },
+      502,
+    );
+  }
+  const wanted = normTitle(title);
+  const namesOf = (a: KitsuAnime) =>
+    [a.attributes.canonicalTitle ?? "", ...Object.values(a.attributes.titles ?? {}), ...(a.attributes.abbreviatedTitles ?? [])].map(normTitle);
+  const pick =
+    list.find((a) => namesOf(a).includes(wanted)) ??
+    list.find((a) => a.attributes.posterImage) ??
+    list[0];
+  if (!pick) return c.json({ ok: false, error: { message: "tidak ketemu di Kitsu", title } }, 404);
+  const at = pick.attributes;
+  const img = (m?: Record<string, string> | null) => m?.large ?? m?.original ?? m?.medium ?? null;
+  return c.json(
+    {
+      ok: true,
+      data: {
+        kitsu_id: pick.id,
+        title: at.canonicalTitle ?? title,
+        match: namesOf(pick).includes(wanted) ? "exact" : "closest",
+        subtype: at.subtype ?? null,
+        status: at.status ?? null,
+        rating: at.averageRating ? Number(at.averageRating) : null,
+        episodes: at.episodeCount ?? null,
+        synopsis: at.synopsis ?? null,
+        poster: img(at.posterImage),
+        cover: img(at.coverImage),
+      },
+    },
+    200,
+    { "Cache-Control": "public, max-age=86400" },
+  );
 });
 
 app.notFound((c) => c.json({ ok: false, error: { message: "route tidak ditemukan" } }, 404));
