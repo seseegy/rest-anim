@@ -50,21 +50,40 @@ function hariJakarta(d = new Date()): string {
 
 type Params = Record<string, string>;
 
-/** Tembak upstream dan teruskan responsnya mentah-mentah + header debug. */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Tembak upstream dan teruskan responsnya mentah-mentah + header debug.
+ * Upstream (di belakang Cloudflare) kadang melempar tantangan 403 secara
+ * probabilistik ke egress datacenter — percobaan ditolak 403 diulang
+ * sampai 3x dengan jeda menaik; hasil terakhir yang diteruskan apa adanya.
+ */
 async function passthrough(base: string, path: string, params: Params): Promise<Response> {
   const url = new URL(base + path);
   for (const [k, v] of Object.entries(params)) url.searchParams.append(k, v);
 
   const t0 = Date.now();
-  let up: Response;
-  try {
-    up = await fetch(url.toString(), { headers: APP_HEADERS });
-  } catch (err) {
+  let up: Response | null = null;
+  let lastErr: unknown = null;
+  let attempts = 0;
+  for (let i = 0; i < 3; i++) {
+    if (i > 0) await sleep(400 * i);
+    attempts++;
+    try {
+      up = await fetch(url.toString(), { headers: APP_HEADERS });
+    } catch (err) {
+      lastErr = err;
+      up = null;
+      continue;
+    }
+    if (up.status !== 403) break;
+  }
+  if (!up) {
     return Response.json(
       {
         ok: false,
         error: "upstream tidak terjangkau",
-        detail: err instanceof Error ? err.message : String(err),
+        detail: lastErr instanceof Error ? lastErr.message : String(lastErr),
         upstream_path: path,
       },
       { status: 502 },
@@ -80,6 +99,7 @@ async function passthrough(base: string, path: string, params: Params): Promise<
       "X-Upstream-Status": String(up.status),
       "X-Upstream-Ms": String(ms),
       "X-Upstream-Path": path,
+      "X-Upstream-Attempts": String(attempts),
     },
   });
 }
