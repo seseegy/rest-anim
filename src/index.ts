@@ -1,9 +1,11 @@
 /**
- * rest-anim — REST API anime (versi MENTAH / passthrough).
+ * rest-anim — REST API anime (versi POLISH).
  *
- * Semua endpoint meneruskan respons upstream AnimeIn APA ADANYA
- * (byte-per-byte, status HTTP ikut diteruskan) supaya mudah di-debug.
- * Belum ada transformasi/penyeragaman amplop — itu tahap berikutnya.
+ * Amplop respons seragam di semua endpoint:
+ *   sukses : { ok: true, data, pagination? }
+ *   gagal  : { ok: false, error: { message, upstream_status? } }
+ * Data di dalam `data` adalah isi `data` upstream apa adanya (tanpa
+ * amplop {status,error,data} milik upstream).
  *
  * Upstream : https://xyz-api.animein.net/3/2  (API aplikasi AnimeIn)
  * Request ke upstream menyalin PERSIS pola handler repo animeruu:
@@ -12,10 +14,16 @@
  *   - explore: selalu 4 parameter (keyword, genre_in, sort, page), page dari 0
  *   - episode: page=0 & search='' ; stream: TANPA parameter sama sekali
  *
+ * Pagination (terukur dari upstream):
+ *   - explore/search : 60 item per halaman, page mulai 0
+ *   - daftar episode : 30 item per halaman, page mulai 0
+ *   Upstream tidak memberi total; has_next = halaman terisi penuh.
+ *
+ * Ketahanan: upstream di belakang Cloudflare kadang melempar tantangan
+ * 403 probabilistik ke egress datacenter — percobaan 403 diulang s/d 3x.
+ *
  * Header debug di setiap respons:
- *   X-Upstream-Status  status HTTP dari upstream
- *   X-Upstream-Ms      latensi upstream (ms)
- *   X-Upstream-Path    path upstream yang ditembak (tanpa query)
+ *   X-Upstream-Status / X-Upstream-Ms / X-Upstream-Path / X-Upstream-Attempts
  */
 
 import { Hono } from "hono";
@@ -52,56 +60,120 @@ type Params = Record<string, string>;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Tembak upstream dan teruskan responsnya mentah-mentah + header debug.
- * Upstream (di belakang Cloudflare) kadang melempar tantangan 403 secara
- * probabilistik ke egress datacenter — percobaan ditolak 403 diulang
- * sampai 3x dengan jeda menaik; hasil terakhir yang diteruskan apa adanya.
- */
-async function passthrough(base: string, path: string, params: Params): Promise<Response> {
+type UpResult = {
+  status: number;
+  text: string;
+  ms: number;
+  attempts: number;
+  path: string;
+};
+
+/** Tembak upstream (dengan retry saat 403), kembalikan badan mentahnya. */
+async function fetchUpstream(base: string, path: string, params: Params): Promise<UpResult> {
   const url = new URL(base + path);
   for (const [k, v] of Object.entries(params)) url.searchParams.append(k, v);
 
   const t0 = Date.now();
-  let up: Response | null = null;
-  let lastErr: unknown = null;
+  let status = 0;
+  let text = "";
   let attempts = 0;
+  let lastErr: unknown = null;
   for (let i = 0; i < 3; i++) {
     if (i > 0) await sleep(400 * i);
     attempts++;
     try {
-      up = await fetch(url.toString(), { headers: APP_HEADERS });
+      const up = await fetch(url.toString(), { headers: APP_HEADERS });
+      status = up.status;
+      text = await up.text();
     } catch (err) {
       lastErr = err;
-      up = null;
+      status = 0;
       continue;
     }
-    if (up.status !== 403) break;
+    if (status !== 403) break;
   }
-  if (!up) {
-    return Response.json(
-      {
-        ok: false,
-        error: "upstream tidak terjangkau",
-        detail: lastErr instanceof Error ? lastErr.message : String(lastErr),
-        upstream_path: path,
-      },
-      { status: 502 },
+  if (status === 0) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  return { status, text, ms: Date.now() - t0, attempts, path };
+}
+
+function debugHeaders(r: UpResult): Record<string, string> {
+  return {
+    "X-Upstream-Status": String(r.status),
+    "X-Upstream-Ms": String(r.ms),
+    "X-Upstream-Path": r.path,
+    "X-Upstream-Attempts": String(r.attempts),
+  };
+}
+
+type Ctx = { env?: Bindings; json: (v: unknown, s?: number, h?: Record<string, string>) => Response };
+
+/** Jalankan satu panggilan upstream lalu bentuk amplop bersihnya. */
+async function respond<T>(
+  c: Ctx,
+  path: string,
+  params: Params,
+  shape: (upstreamData: unknown) => { data: T; pagination?: Pagination },
+): Promise<Response> {
+  let r: UpResult;
+  try {
+    r = await fetchUpstream(baseOf(c), path, params);
+  } catch (err) {
+    return c.json(
+      { ok: false, error: { message: "upstream tidak terjangkau", detail: err instanceof Error ? err.message : String(err) } },
+      502,
     );
   }
-  const body = await up.arrayBuffer();
-  const ms = Date.now() - t0;
+  const headers = debugHeaders(r);
+  if (r.status !== 200) {
+    return c.json(
+      { ok: false, error: { message: `upstream menjawab ${r.status}`, upstream_status: r.status } },
+      502,
+      headers,
+    );
+  }
+  let parsed: { data?: unknown } | null = null;
+  try {
+    parsed = JSON.parse(r.text) as { data?: unknown };
+  } catch {
+    parsed = null;
+  }
+  if (parsed === null || typeof parsed !== "object" || !("data" in parsed)) {
+    return c.json(
+      { ok: false, error: { message: "respons upstream bukan JSON yang dikenal", upstream_status: r.status } },
+      502,
+      headers,
+    );
+  }
+  const { data, pagination } = shape(parsed.data);
+  return c.json(pagination ? { ok: true, data, pagination } : { ok: true, data }, 200, headers);
+}
 
-  return new Response(body, {
-    status: up.status,
-    headers: {
-      "Content-Type": up.headers.get("Content-Type") ?? "application/json; charset=utf-8",
-      "X-Upstream-Status": String(up.status),
-      "X-Upstream-Ms": String(ms),
-      "X-Upstream-Path": path,
-      "X-Upstream-Attempts": String(attempts),
-    },
-  });
+type Pagination = {
+  page: number;
+  per_page: number;
+  count: number;
+  has_next: boolean;
+  next_page: number | null;
+  prev_page: number | null;
+};
+
+function pagination(page: number, perPage: number, count: number): Pagination {
+  const hasNext = count >= perPage;
+  return {
+    page,
+    per_page: perPage,
+    count,
+    has_next: hasNext,
+    next_page: hasNext ? page + 1 : null,
+    prev_page: page > 0 ? page - 1 : null,
+  };
+}
+
+/** Ambil ?page= sebagai bilangan >= 0; selain itu null (→ 400). */
+function parsePage(raw: string | undefined): number | null {
+  if (raw === undefined) return 0;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -113,8 +185,8 @@ app.use("*", cors());
 app.get("/", (c) =>
   c.json({
     name: "rest-anim",
-    version: "0.1.0-raw",
-    mode: "passthrough mentah (respons upstream apa adanya)",
+    version: "1.0.0",
+    mode: "polished (amplop bersih + pagination)",
     upstream: UPSTREAM_DEFAULT,
     endpoints: [
       "GET /api/health",
@@ -133,49 +205,63 @@ app.get("/api/health", (c) => c.json({ ok: true, upstream: baseOf(c) }));
 /** Beranda: today/hot/new/fyp/popular/slider/trailer (per hari). */
 app.get("/api/home", (c) => {
   const day = (c.req.query("day") || hariJakarta()).toUpperCase();
-  return passthrough(baseOf(c), "/home/data", {
-    ...TAMU,
-    limit: "20",
-    setup_fyp_flag: "Y",
-    day,
-  });
+  return respond(c, "/home/data", { ...TAMU, limit: "20", setup_fyp_flag: "Y", day }, (data) => ({ data }));
 });
 
-/** Jadwal tayang per hari. */
+/** Jadwal tayang per hari → daftar anime. */
 app.get("/api/schedule", (c) => {
   const day = (c.req.query("day") || hariJakarta()).toUpperCase();
-  return passthrough(baseOf(c), "/schedule/data", { day });
+  return respond(c, "/schedule/data", { day }, (data) => {
+    const movies = (data as { movie?: unknown[] } | null)?.movie ?? [];
+    return { data: movies };
+  });
 });
 
-/** Browse + pencarian. Keempat parameter WAJIB ada (page mulai 0). */
+/** Browse + pencarian. 60 item/halaman, page mulai 0. */
 app.get("/api/search", (c) => {
-  return passthrough(baseOf(c), "/explore/movie", {
-    keyword: c.req.query("keyword") ?? "",
-    genre_in: c.req.query("genre") ?? "",
-    sort: c.req.query("sort") ?? "views",
-    page: c.req.query("page") ?? "0",
-  });
+  const page = parsePage(c.req.query("page"));
+  if (page === null) return c.json({ ok: false, error: { message: "page harus bilangan >= 0" } }, 400);
+  return respond(
+    c,
+    "/explore/movie",
+    {
+      keyword: c.req.query("keyword") ?? "",
+      genre_in: c.req.query("genre") ?? "",
+      sort: c.req.query("sort") ?? "views",
+      page: String(page),
+    },
+    (data) => {
+      const movies = (data as { movie?: unknown[] } | null)?.movie ?? [];
+      return { data: movies, pagination: pagination(page, 60, movies.length) };
+    },
+  );
 });
 
 /** Detail anime (data.movie + episode pertama + season). */
 app.get("/api/anime/:id", (c) => {
-  return passthrough(baseOf(c), `/movie/detail/${c.req.param("id")}`, { ...TAMU });
+  return respond(c, `/movie/detail/${c.req.param("id")}`, { ...TAMU }, (data) => ({ data }));
 });
 
-/** Daftar episode (data.episode). Hanya bermakna untuk type SERIES. */
+/** Daftar episode. 30 item/halaman; hanya bermakna untuk type SERIES. */
 app.get("/api/anime/:id/episodes", (c) => {
-  return passthrough(baseOf(c), `/movie/episode/${c.req.param("id")}`, {
-    ...TAMU,
-    page: c.req.query("page") ?? "0",
-    search: c.req.query("search") ?? "",
-  });
+  const page = parsePage(c.req.query("page"));
+  if (page === null) return c.json({ ok: false, error: { message: "page harus bilangan >= 0" } }, 400);
+  return respond(
+    c,
+    `/movie/episode/${c.req.param("id")}`,
+    { ...TAMU, page: String(page), search: c.req.query("search") ?? "" },
+    (data) => {
+      const episodes = (data as { episode?: unknown[] } | null)?.episode ?? [];
+      return { data: episodes, pagination: pagination(page, 30, episodes.length) };
+    },
+  );
 });
 
 /** Server stream satu episode. Upstream dipanggil TANPA parameter. */
 app.get("/api/episode/:id/stream", (c) => {
-  return passthrough(baseOf(c), `/episode/streamnew/${c.req.param("id")}`, {});
+  return respond(c, `/episode/streamnew/${c.req.param("id")}`, {}, (data) => ({ data }));
 });
 
-app.notFound((c) => c.json({ ok: false, error: "route tidak ditemukan" }, 404));
+app.notFound((c) => c.json({ ok: false, error: { message: "route tidak ditemukan" } }, 404));
 
 export default app;
