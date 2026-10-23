@@ -9,11 +9,14 @@ Satu codebase Hono, tiga rumah: **Cloudflare Workers** (`src/index.ts` via wrang
 **Vercel** (`api/index.ts` + `vercel.json`), dan **Node biasa** (`src/server.ts`,
 untuk VPS/Termux). Kode + rute identik di ketiganya; yang beda cuma transport.
 
-**Catatan egress (hasil uji 23 Okt 2026):** upstream memblokir/menantang egress
-datacenter — Workers kena blokir keras 403 ("you have been blocked"), Vercel kena
-tantangan JS 403 ("Just a moment..."). Dari koneksi residensial (HP/Termux)
-keenam endpoint lolos penuh. Karena itu versi Node inilah jalur produksi yang
-terbukti: jalankan dari jaringan yang lolos.
+**Catatan egress (hasil uji 23 Okt 2026):** upstream di belakang Cloudflare
+menilai egress per request secara probabilistik. Workers kena blokir keras 403
+("you have been blocked"). Vercel (region fungsi **sin1**, Node 22) kebanyakan
+lolos, sesekali kena tantangan JS 403 ("Just a moment...") — karena itu
+passthrough kini **mengulang sampai 3x bila ditolak 403** (terlihat di header
+`X-Upstream-Attempts`). Production yang terbukti mengalirkan data:
+**https://rest-anim.vercel.app** (keenam endpoint 200, ukuran cocok dengan
+tangkapan live Termux). Varian Node tetap tersedia untuk VPS/Termux.
 
 ## Endpoint
 
