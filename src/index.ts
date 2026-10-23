@@ -86,7 +86,7 @@ async function passthrough(base: string, path: string, params: Params): Promise<
 
 const app = new Hono<{ Bindings: Bindings }>();
 
-const baseOf = (c: { env: Bindings }) => c.env.UPSTREAM_BASE_URL ?? UPSTREAM_DEFAULT;
+const baseOf = (c: { env?: Bindings }) => c.env?.UPSTREAM_BASE_URL ?? UPSTREAM_DEFAULT;
 
 app.use("*", cors());
 
