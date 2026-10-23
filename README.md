@@ -60,6 +60,7 @@ tangkapan live Termux). Varian Node tetap tersedia untuk VPS/Termux.
 | `GET /api/anime/:id/episodes?page=0&search=` | `/3/2/movie/episode/:id` | daftar di `data.episode`; hanya SERIES |
 | `GET /api/episode/:id/stream` | `/3/2/episode/streamnew/:id` | upstream tanpa parameter |
 | `GET /api/image?url=<url CDN>` | CDN `api.animein.net` | proxy gambar (hanya host *.animein.net); **status: CDN menolak egress server (0/18 uji 23 Okt) — rute siaga, jangan diandalkan dulu** |
+| `GET /api/poster?title=<judul>` | **Kitsu** (`kitsu.io/api/edge`, tanpa key) | poster + cover + rating + sinopsis pengganti dari basis data anime Kitsu; pencocokan judul persis diutamakan (`match: exact`/`closest`); cache 24 jam. Ini jalur poster yang bekerja — CDN gambar AnimeIn memblokir server. |
 
 ## Header debug
 
